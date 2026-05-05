@@ -39,6 +39,6 @@ jobs:
           platforms: linux/amd64
           tags: |
             ${{ env.OCI_REGION }}.ocir.io/${{ env.OCI_NAMESPACE }}/${{ env.OCI_REPO_NAME }}:${{ github.sha }}
-            ${{ env.OCI_REGION }}.ocir.io/${{ env.OCI_NAMESPACE }}/${{ env.OCI_REPO_NAME }}:${{ env.IMAGE_TAG }}
+            ${{ env.OCI_REGION }}.ocir.io/${{ env.OCI_NAMESPACE }}/${{ env.OCI_REPO_NAME }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
