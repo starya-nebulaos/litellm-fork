@@ -2,7 +2,7 @@ name: Build and Push to OCIR
 
 on:
   push:
-    branches: [main]
+    branches: [litellm_internal_staging]
 
 env:
   REGISTRY: sa-saopaulo-1.ocir.io
