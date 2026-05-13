@@ -1,0 +1,44 @@
+name: Build and Push to OCIR
+
+on:
+  push:
+    branches: [litellm_internal_staging]
+
+env:
+  OCI_REGION: sa-saopaulo-1
+  OCI_NAMESPACE: gr4yakoorvrm
+  OCI_USERNAME: starya-github-actions
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set Environment Variables
+        run: |
+          echo "OCI_REPO_NAME=litellm" >> $GITHUB_ENV
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to OCI Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.OCI_REGION }}.ocir.io
+          username: ${{ env.OCI_NAMESPACE }}/${{ env.OCI_USERNAME }}
+          password: ${{ secrets.OCI_DEFAULT_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ env.OCI_REGION }}.ocir.io/${{ env.OCI_NAMESPACE }}/${{ env.OCI_REPO_NAME }}:${{ github.sha }}
+            ${{ env.OCI_REGION }}.ocir.io/${{ env.OCI_NAMESPACE }}/${{ env.OCI_REPO_NAME }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

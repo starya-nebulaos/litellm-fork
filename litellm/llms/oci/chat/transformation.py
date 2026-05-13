@@ -10,6 +10,8 @@ implement the LiteLLM BaseConfig interface.  Heavy-lifting lives in:
 """
 
 import json
+import uuid
+from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -445,7 +447,6 @@ class OCIChatConfig(BaseConfig):
             )
 
         return data.model_dump(exclude_none=True)
-
     def transform_response(
         self,
         model: str,
