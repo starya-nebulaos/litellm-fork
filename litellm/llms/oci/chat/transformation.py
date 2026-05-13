@@ -201,6 +201,9 @@ class OCIChatConfig(BaseConfig):
             if alias is None:
                 adapted_params[key] = value
                 continue
+            # OCI expects reasoning_effort in uppercase (NONE, MINIMAL, LOW, MEDIUM, HIGH)
+            if key == "reasoning_effort" and isinstance(value, str):
+                value = value.upper()
             adapted_params[alias] = value
 
         return adapted_params
