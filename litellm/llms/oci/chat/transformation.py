@@ -202,8 +202,11 @@ class OCIChatConfig(BaseConfig):
                 adapted_params[key] = value
                 continue
             # OCI expects reasoning_effort in uppercase (NONE, MINIMAL, LOW, MEDIUM, HIGH)
+            # Map OpenAI "disable" to OCI "NONE"
             if key == "reasoning_effort" and isinstance(value, str):
                 value = value.upper()
+                if value == "DISABLE":
+                    value = "NONE"
             adapted_params[alias] = value
 
         return adapted_params
