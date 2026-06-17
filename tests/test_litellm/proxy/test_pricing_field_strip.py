@@ -18,7 +18,7 @@ import pytest
 from fastapi import Request
 
 import litellm
-from litellm.proxy._types import UserAPIKeyAuth
+from litellm.proxy._types import LitellmUserRoles, UserAPIKeyAuth
 from litellm.proxy.litellm_pre_call_utils import (
     _CLIENT_PRICING_CONTROL_FIELDS,
     _CLIENT_PRICING_METADATA_FIELDS,
@@ -281,6 +281,42 @@ async def test_add_litellm_data_to_request_skips_strip_with_team_opt_in():
     )
 
     assert updated["input_cost_per_token"] == 0.0001
+
+
+@pytest.mark.asyncio
+async def test_add_litellm_data_to_request_skips_strip_for_proxy_admin():
+    """PROXY_ADMIN (master key) should bypass pricing override check automatically."""
+    data = {
+        "model": "gpt-4",
+        "messages": [{"role": "user", "content": "hi"}],
+        "input_cost_per_token": 0.0001,
+        "output_cost_per_token": 0.0002,
+        "metadata": {"model_info": {"cache_read_input_token_cost": 0.00001}},
+    }
+
+    user_auth = UserAPIKeyAuth(
+        api_key="master-key-alias",
+        user_role=LitellmUserRoles.PROXY_ADMIN,
+        metadata={},
+        team_metadata={},
+        spend=0.0,
+        max_budget=None,
+        model_max_budget={},
+        team_spend=0.0,
+        team_max_budget=None,
+    )
+    updated = await add_litellm_data_to_request(
+        data=data,
+        request=_make_request_mock(),
+        user_api_key_dict=user_auth,
+        proxy_config=MagicMock(),
+        general_settings={},
+        version="test-version",
+    )
+
+    assert updated["input_cost_per_token"] == 0.0001
+    assert updated["output_cost_per_token"] == 0.0002
+    assert updated["metadata"]["model_info"] == {"cache_read_input_token_cost": 0.00001}
 
 
 @pytest.mark.asyncio
