@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
+      - ci/deploy-ecr
       - litellm_internal_staging
 
 env:
