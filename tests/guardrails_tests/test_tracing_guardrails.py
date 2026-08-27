@@ -1,4 +1,3 @@
-import sys
 import os
 import io, asyncio
 import json
@@ -7,7 +6,6 @@ import time
 from litellm import mock_completion
 from unittest.mock import MagicMock, AsyncMock, patch
 
-sys.path.insert(0, os.path.abspath("../.."))
 import litellm
 from litellm.proxy.guardrails.guardrail_hooks.presidio import (
     _OPTIONAL_PresidioPIIMasking,
@@ -122,7 +120,7 @@ async def test_standard_logging_payload_includes_guardrail_information():
 
     # 1. call the pre call hook with guardrail
     request_data = {
-        "model": "gpt-4o",
+        "model": "gpt-5.5",
         "messages": [
             {"role": "user", "content": "Hello, my phone number is +1 412 555 1212"},
         ],
@@ -221,7 +219,7 @@ async def test_langfuse_trace_includes_guardrail_information():
         )
         # 1. call the pre call hook with guardrail
         request_data = {
-            "model": "gpt-4o",
+            "model": "gpt-5.5",
             "messages": [
                 {
                     "role": "user",
@@ -343,7 +341,7 @@ async def test_bedrock_guardrail_status_blocked():
         bedrock_guard.async_handler, "post", AsyncMock(return_value=mock_response)
     ):
         request_data = {
-            "model": "gpt-4o",
+            "model": "gpt-5.5",
             "messages": [{"role": "user", "content": "harmful content"}],
             "mock_response": "Hello",
             "metadata": {},
@@ -440,7 +438,7 @@ async def test_bedrock_guardrail_status_success():
         bedrock_guard.async_handler, "post", AsyncMock(return_value=mock_response)
     ):
         request_data = {
-            "model": "gpt-4o",
+            "model": "gpt-5.5",
             "messages": [{"role": "user", "content": "safe content"}],
             "mock_response": "Hello",
             "metadata": {},
@@ -524,7 +522,7 @@ async def test_bedrock_guardrail_status_failure():
         AsyncMock(side_effect=httpx.ConnectError("Connection failed")),
     ):
         request_data = {
-            "model": "gpt-4o",
+            "model": "gpt-5.5",
             "messages": [{"role": "user", "content": "test content"}],
             "mock_response": "Hello",
             "metadata": {},
@@ -615,7 +613,7 @@ async def test_noma_guardrail_status_blocked():
         noma_guard.async_handler, "post", AsyncMock(return_value=mock_response)
     ):
         request_data = {
-            "model": "gpt-4o",
+            "model": "gpt-5.5",
             "messages": [{"role": "user", "content": "harmful content"}],
             "mock_response": "Hello",
             "metadata": {},
@@ -703,7 +701,7 @@ async def test_noma_guardrail_status_success():
         noma_guard.async_handler, "post", AsyncMock(return_value=mock_response)
     ):
         request_data = {
-            "model": "gpt-4o",
+            "model": "gpt-5.5",
             "messages": [{"role": "user", "content": "safe content"}],
             "mock_response": "Hello",
             "metadata": {},

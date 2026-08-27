@@ -1,9 +1,7 @@
 import io
 import os
-import sys
 
 
-sys.path.insert(0, os.path.abspath("../.."))
 
 import asyncio
 import litellm
@@ -445,7 +443,7 @@ async def test_openai_with_knowledge_base_mock_openai(setup_vector_store_registr
             mock_response.id = "chatcmpl-123"
             mock_response.object = "chat.completion"
             mock_response.created = 1234567890
-            mock_response.model = "gpt-4"
+            mock_response.model = "gpt-5.5"
 
             # Store the request for verification
             captured_request.update(kwargs)
@@ -459,7 +457,7 @@ async def test_openai_with_knowledge_base_mock_openai(setup_vector_store_registr
 
         try:
             await litellm.acompletion(
-                model="gpt-4",
+                model="gpt-5.5",
                 messages=[{"role": "user", "content": "what is litellm?"}],
                 vector_store_ids=["T37J8R4WTM"],
                 client=client,
@@ -521,7 +519,7 @@ async def test_openai_with_vector_store_ids_in_tool_call_mock_openai(
             mock_response.id = "chatcmpl-123"
             mock_response.object = "chat.completion"
             mock_response.created = 1234567890
-            mock_response.model = "gpt-4"
+            mock_response.model = "gpt-5.5"
 
             # Store the request for verification
             captured_request.update(kwargs)
@@ -535,7 +533,7 @@ async def test_openai_with_vector_store_ids_in_tool_call_mock_openai(
 
         try:
             await litellm.acompletion(
-                model="gpt-4",
+                model="gpt-5.5",
                 messages=[{"role": "user", "content": "what is litellm?"}],
                 tools=[{"type": "file_search", "vector_store_ids": ["T37J8R4WTM"]}],
                 client=client,
@@ -594,7 +592,7 @@ async def test_openai_with_mixed_tool_call_mock_openai(setup_vector_store_regist
             mock_response.id = "chatcmpl-123"
             mock_response.object = "chat.completion"
             mock_response.created = 1234567890
-            mock_response.model = "gpt-4"
+            mock_response.model = "gpt-5.5"
 
             # Store the request for verification
             captured_request.update(kwargs)
@@ -608,7 +606,7 @@ async def test_openai_with_mixed_tool_call_mock_openai(setup_vector_store_regist
 
         try:
             await litellm.acompletion(
-                model="gpt-4",
+                model="gpt-5.5",
                 messages=[{"role": "user", "content": "what is litellm?"}],
                 tools=[
                     {"type": "file_search", "vector_store_ids": ["T37J8R4WTM"]},
@@ -642,7 +640,7 @@ async def test_openai_with_mixed_tool_call_mock_openai(setup_vector_store_regist
 #     test_custom_logger = MockCustomLogger()
 #     litellm.set_verbose = True
 #     await litellm.acompletion(
-#         model="gpt-4",
+#         model="gpt-5.5",
 #         messages=[{"role": "user", "content": "what is litellm?"}],
 #         vector_store_ids = [
 #             "T37J8R4WTM"
@@ -834,7 +832,7 @@ async def test_provider_specific_fields_in_proxy_http_response(
 
     # Initialize proxy
     await initialize(
-        model="gpt-3.5-turbo",
+        model="gpt-5-mini",
         alias=None,
         api_base=None,
         debug=False,
@@ -857,7 +855,7 @@ async def test_provider_specific_fields_in_proxy_http_response(
     # Create mock response with provider_specific_fields
     mock_response = litellm.ModelResponse(
         id="test-123",
-        model="gpt-3.5-turbo",
+        model="gpt-5-mini",
         created=1234567890,
         object="chat.completion",
     )
@@ -897,7 +895,7 @@ async def test_provider_specific_fields_in_proxy_http_response(
         response = client.post(
             "/v1/chat/completions",
             json={
-                "model": "gpt-3.5-turbo",
+                "model": "gpt-5-mini",
                 "messages": [{"role": "user", "content": "What is litellm?"}],
             },
         )

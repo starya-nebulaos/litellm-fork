@@ -5,15 +5,12 @@ These tests exercise the transformation layer only — no real OCI calls are mad
 """
 
 import json
-import os
-import sys
 from typing import Any
 from unittest.mock import MagicMock
 
 import httpx
 import pytest
 
-sys.path.insert(0, os.path.abspath("../../../../.."))
 
 from litellm.llms.oci.common_utils import OCIError
 from litellm.llms.oci.embed.transformation import OCI_EMBED_BATCH_LIMIT, OCIEmbedConfig
@@ -73,7 +70,7 @@ class TestOCIEmbedConfig:
         )
 
     def test_get_complete_url_respects_api_base(self):
-        """api_base is returned as-is (caller supplies complete URL for dedicated/custom endpoints)."""
+        """api_base is treated as a base URL — the action path is appended."""
         cfg = self._config()
         url = cfg.get_complete_url(
             api_base="https://custom.endpoint.example.com",
@@ -82,10 +79,10 @@ class TestOCIEmbedConfig:
             optional_params={},
             litellm_params={},
         )
-        assert url == "https://custom.endpoint.example.com"
+        assert url == "https://custom.endpoint.example.com/20231130/actions/embedText"
 
     def test_get_complete_url_strips_trailing_slash(self):
-        """Trailing slash is stripped from api_base."""
+        """Trailing slash is stripped from api_base before appending the action path."""
         cfg = self._config()
         url = cfg.get_complete_url(
             api_base="https://custom.endpoint.example.com/",
@@ -94,7 +91,23 @@ class TestOCIEmbedConfig:
             optional_params={},
             litellm_params={},
         )
-        assert url == "https://custom.endpoint.example.com"
+        assert url == "https://custom.endpoint.example.com/20231130/actions/embedText"
+
+    def test_get_complete_url_full_url_is_not_doubled(self):
+        """A fully-formed embedText URL must not have the action path appended twice."""
+        cfg = self._config()
+        full_url = (
+            "https://inference.generativeai.us-chicago-1.oci.oraclecloud.com"
+            "/20231130/actions/embedText"
+        )
+        url = cfg.get_complete_url(
+            api_base=full_url,
+            api_key=None,
+            model="cohere.embed-v3.0",
+            optional_params={},
+            litellm_params={},
+        )
+        assert url == full_url
 
     # ------------------------------------------------------------------
     # transform_embedding_request

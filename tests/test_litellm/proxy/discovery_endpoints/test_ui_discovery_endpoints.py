@@ -1,12 +1,10 @@
 import os
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-sys.path.insert(0, os.path.abspath("../../.."))
 
 from litellm.proxy.discovery_endpoints.ui_discovery_endpoints import router
 from litellm.types.proxy.control_plane_endpoints import WorkerRegistryEntry
@@ -298,29 +296,6 @@ def test_ui_discovery_endpoints_with_admin_ui_disabled():
         assert data["sso_configured"] is False
 
 
-def test_ui_discovery_endpoints_with_admin_ui_enabled():
-    app = FastAPI()
-    app.include_router(router)
-    client = TestClient(app)
-
-    with (
-        patch("litellm.proxy.utils.get_server_root_path", return_value="/"),
-        patch("litellm.proxy.utils.get_proxy_base_url", return_value=None),
-        patch("litellm.proxy.auth.auth_utils._has_user_setup_sso", return_value=False),
-        patch.dict(os.environ, {"DISABLE_ADMIN_UI": "false"}, clear=False),
-    ):
-
-        response = client.get("/.well-known/litellm-ui-config")
-
-        assert response.status_code == 200
-        data = response.json()
-        assert data["server_root_path"] == "/"
-        assert data["proxy_base_url"] is None
-        assert data["auto_redirect_to_sso"] is False
-        assert data["admin_ui_disabled"] is False
-        assert data["sso_configured"] is False
-
-
 def test_ui_discovery_endpoints_is_control_plane_true_when_workers_configured():
     app = FastAPI()
     app.include_router(router)
@@ -350,6 +325,79 @@ def test_ui_discovery_endpoints_is_control_plane_true_when_workers_configured():
         assert data["workers"][0]["worker_id"] == "team-a"
         assert data["workers"][0]["name"] == "Team A"
         assert data["workers"][0]["url"] == "https://worker-1:4001"
+
+
+def test_ui_discovery_endpoints_hide_default_credentials_hint_default_false():
+    """Default credentials hint is shown by default (flag false)."""
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    with (
+        patch("litellm.proxy.utils.get_server_root_path", return_value="/"),
+        patch("litellm.proxy.utils.get_proxy_base_url", return_value=None),
+        patch("litellm.proxy.auth.auth_utils._has_user_setup_sso", return_value=False),
+        patch.dict(os.environ, {"DISABLE_ADMIN_UI": "false"}, clear=False),
+    ):
+        os.environ.pop("LITELLM_HIDE_DEFAULT_CREDENTIALS_HINT", None)
+
+        response = client.get("/.well-known/litellm-ui-config")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["hide_default_credentials_hint"] is False
+
+
+def test_ui_discovery_endpoints_hide_default_credentials_hint_via_env_var():
+    """LITELLM_HIDE_DEFAULT_CREDENTIALS_HINT=true hides the login-page credentials card."""
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    with (
+        patch("litellm.proxy.utils.get_server_root_path", return_value="/"),
+        patch("litellm.proxy.utils.get_proxy_base_url", return_value=None),
+        patch("litellm.proxy.auth.auth_utils._has_user_setup_sso", return_value=False),
+        patch.dict(
+            os.environ,
+            {
+                "LITELLM_HIDE_DEFAULT_CREDENTIALS_HINT": "true",
+                "DISABLE_ADMIN_UI": "false",
+            },
+            clear=False,
+        ),
+    ):
+
+        response = client.get("/.well-known/litellm-ui-config")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["hide_default_credentials_hint"] is True
+
+
+def test_ui_discovery_endpoints_hide_default_credentials_hint_via_general_settings():
+    """general_settings.hide_default_credentials_hint=true also hides the card."""
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    with (
+        patch("litellm.proxy.utils.get_server_root_path", return_value="/"),
+        patch("litellm.proxy.utils.get_proxy_base_url", return_value=None),
+        patch("litellm.proxy.auth.auth_utils._has_user_setup_sso", return_value=False),
+        patch(
+            "litellm.proxy.proxy_server.general_settings",
+            {"hide_default_credentials_hint": True},
+        ),
+        patch.dict(os.environ, {"DISABLE_ADMIN_UI": "false"}, clear=False),
+    ):
+        os.environ.pop("LITELLM_HIDE_DEFAULT_CREDENTIALS_HINT", None)
+
+        response = client.get("/.well-known/litellm-ui-config")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["hide_default_credentials_hint"] is True
 
 
 def test_ui_discovery_endpoints_is_control_plane_false_when_no_workers():

@@ -125,3 +125,122 @@ class TestGetLitellmParamsExplicitFields:
     def test_no_log_from_explicit_param(self):
         result = get_litellm_params(no_log=True)
         assert result["no-log"] is True
+
+
+class TestGetLitellmParamsDataResidency:
+    """Verify that data_residency is inferred from OpenAI regional api_base."""
+
+    def test_eu_host_resolves_to_eu(self):
+        result = get_litellm_params(
+            custom_llm_provider="openai",
+            api_base="https://eu.api.openai.com/v1",
+        )
+        assert result["data_residency"] == "eu"
+
+    def test_us_host_resolves_to_us(self):
+        result = get_litellm_params(
+            custom_llm_provider="openai",
+            api_base="https://us.api.openai.com/v1",
+        )
+        assert result["data_residency"] == "us"
+
+    def test_global_host_resolves_to_none(self):
+        result = get_litellm_params(
+            custom_llm_provider="openai",
+            api_base="https://api.openai.com/v1",
+        )
+        assert result["data_residency"] is None
+
+    def test_no_api_base_is_none(self):
+        result = get_litellm_params(custom_llm_provider="openai")
+        assert result["data_residency"] is None
+
+    def test_non_openai_provider_does_not_resolve(self):
+        """Regional OpenAI host doesn't apply to other providers."""
+        result = get_litellm_params(
+            custom_llm_provider="anthropic",
+            api_base="https://eu.api.openai.com/v1",
+        )
+        assert result["data_residency"] is None
+
+
+class TestMetadataFallsBackToLitellmMetadata:
+    def test_metadata_falls_back_to_litellm_metadata_when_absent(self):
+        result = get_litellm_params(litellm_metadata={"trace_id": "trace-1"})
+        assert result["metadata"] == {"trace_id": "trace-1"}
+        assert result["litellm_metadata"] == {"trace_id": "trace-1"}
+
+    def test_empty_metadata_falls_back_to_litellm_metadata(self):
+        result = get_litellm_params(metadata={}, litellm_metadata={"trace_id": "trace-1"})
+        assert result["metadata"] == {"trace_id": "trace-1"}
+
+    def test_metadata_wins_when_both_present(self):
+        result = get_litellm_params(
+            metadata={"trace_id": "from-metadata"},
+            litellm_metadata={"trace_id": "from-litellm-metadata"},
+        )
+        assert result["metadata"] == {"trace_id": "from-metadata"}
+
+    @pytest.mark.parametrize("bad_value", ["not-json-a-string", 12345, ["a"], True])
+    def test_non_dict_litellm_metadata_is_ignored(self, bad_value):
+        result = get_litellm_params(litellm_metadata=bad_value)
+        assert result["metadata"] is None
+
+    def test_metadata_stays_none_without_litellm_metadata(self):
+        result = get_litellm_params(api_key="test-key")
+        assert result["metadata"] is None
+
+    def test_session_and_trace_id_derived_from_litellm_metadata(self):
+        result = get_litellm_params(
+            litellm_metadata={"trace_id": "trace-1", "session_id": "session-1"},
+        )
+        assert result["litellm_session_id"] == "session-1"
+        assert result["litellm_trace_id"] == "trace-1"
+
+    def test_explicit_session_and_trace_id_are_not_overridden(self):
+        result = get_litellm_params(
+            litellm_session_id="explicit-session",
+            litellm_trace_id="explicit-trace",
+            litellm_metadata={"trace_id": "trace-1", "session_id": "session-1"},
+        )
+        assert result["litellm_session_id"] == "explicit-session"
+        assert result["litellm_trace_id"] == "explicit-trace"
+
+    def test_litellm_metadata_fallback_is_copied_not_aliased(self):
+        litellm_metadata = {"trace_id": "trace-1"}
+
+        result = get_litellm_params(litellm_metadata=litellm_metadata)
+
+        assert result["metadata"] == litellm_metadata
+        assert result["metadata"] is not litellm_metadata
+        result["metadata"].pop("trace_id")
+        assert litellm_metadata == {"trace_id": "trace-1"}
+
+
+class TestRustOptIn:
+    """`rust: true` is a litellm param, so it has to reach `litellm_params`.
+
+    `all_litellm_params` keeps it out of the provider body; without it also
+    being carried into `litellm_params` the chat completions handlers cannot
+    see the opt-in and the Rust path is silently never taken.
+    """
+
+    def test_rust_is_an_optional_kwargs_key(self):
+        assert "rust" in _OPTIONAL_KWARGS_KEYS
+
+    def test_rust_is_forwarded_from_completion_kwargs(self):
+        from litellm.litellm_core_utils.get_litellm_params import FORWARDED_KWARGS_KEYS
+
+        assert "rust" in FORWARDED_KWARGS_KEYS
+
+    def test_rust_survives_into_litellm_params(self):
+        params = get_litellm_params(rust=True)
+        assert params["rust"] is True
+
+    def test_rust_is_absent_when_the_deployment_did_not_set_it(self):
+        assert "rust" not in get_litellm_params()
+
+    def test_rust_stays_out_of_the_provider_body(self):
+        from litellm.types.utils import all_litellm_params
+
+        assert "rust" in all_litellm_params

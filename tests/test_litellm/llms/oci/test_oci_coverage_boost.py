@@ -11,10 +11,15 @@ All tests are self-contained and require no real OCI credentials or network acce
 """
 
 import json
+from typing import TYPE_CHECKING
+
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 
 import httpx
+
+if TYPE_CHECKING:
+    from litellm.llms.oci.chat.transformation import OCIStreamWrapper
 
 from litellm import ModelResponse
 from litellm.llms.oci.chat.cohere import (
@@ -397,7 +402,7 @@ def test_handle_generic_stream_chunk_no_message():
     """Chunks without a message key should still parse without error."""
     chunk = {"finishReason": "COMPLETE", "index": 1}
     result = handle_generic_stream_chunk(chunk)
-    assert result.choices[0].delta.content == ""
+    assert result.choices[0].delta.content is None
     assert result.choices[0].finish_reason == "stop"
 
 
@@ -532,10 +537,13 @@ _COHERE_RESPONSE_JSON = {
 }
 
 
+_COHERE_RAW_RESPONSE = httpx.Response(200, request=httpx.Request("POST", "https://oci"))
+
+
 def test_handle_cohere_response_complete():
     model_response = ModelResponse()
     result = handle_cohere_response(
-        _COHERE_RESPONSE_JSON, _COHERE_MODEL, model_response
+        _COHERE_RESPONSE_JSON, _COHERE_MODEL, model_response, _COHERE_RAW_RESPONSE
     )
     assert result.choices[0].finish_reason == "stop"
     assert result.choices[0].message["content"] == "Hello from Cohere!"
@@ -551,7 +559,9 @@ def test_handle_cohere_response_max_tokens():
         },
     }
     model_response = ModelResponse()
-    result = handle_cohere_response(resp, _COHERE_MODEL, model_response)
+    result = handle_cohere_response(
+        resp, _COHERE_MODEL, model_response, _COHERE_RAW_RESPONSE
+    )
     assert result.choices[0].finish_reason == "length"
 
 
@@ -565,11 +575,40 @@ def test_handle_cohere_response_tool_call():
         },
     }
     model_response = ModelResponse()
-    result = handle_cohere_response(resp, _COHERE_MODEL, model_response)
+    result = handle_cohere_response(
+        resp, _COHERE_MODEL, model_response, _COHERE_RAW_RESPONSE
+    )
     assert result.choices[0].finish_reason == "tool_calls"
     tool_calls = result.choices[0].message["tool_calls"]
     assert tool_calls is not None
     assert tool_calls[0]["function"]["name"] == "get_time"
+
+
+def test_handle_cohere_response_missing_usage():
+    resp = {
+        **_COHERE_RESPONSE_JSON,
+        "chatResponse": {
+            k: v
+            for k, v in _COHERE_RESPONSE_JSON["chatResponse"].items()
+            if k != "usage"
+        },
+    }
+    model_response = ModelResponse()
+    result = handle_cohere_response(
+        resp, _COHERE_MODEL, model_response, _COHERE_RAW_RESPONSE
+    )
+    assert result.usage.prompt_tokens == 0
+    assert result.usage.completion_tokens == 0
+    assert result.usage.total_tokens == 0
+
+
+def test_handle_cohere_response_malformed_raises_oci_error():
+    bad_json = {"chatResponse": {"apiFormat": "COHERE"}}
+    raw = httpx.Response(502, request=httpx.Request("POST", "https://oci"))
+    model_response = ModelResponse()
+    with pytest.raises(OCIError) as exc_info:
+        handle_cohere_response(bad_json, _COHERE_MODEL, model_response, raw)
+    assert exc_info.value.status_code == 502
 
 
 # ===========================================================================
@@ -585,21 +624,108 @@ def test_handle_cohere_stream_chunk_text():
 
 
 def test_handle_cohere_stream_chunk_complete():
-    chunk = {"apiFormat": "COHERE", "text": "", "finishReason": "COMPLETE"}
-    result = handle_cohere_stream_chunk(chunk)
+    # Real OCI Cohere terminal events carry the full response in `text` plus a
+    # populated `chatHistory`; the parser must drop that text to avoid doubling
+    # — but only when prior chunks already emitted the text as incremental
+    # deltas (signalled by ``prior_text_emitted=True``).
+    chunk = {
+        "apiFormat": "COHERE",
+        "text": "How can I help you today?",
+        "finishReason": "COMPLETE",
+        "chatHistory": [
+            {"role": "USER", "message": "Hello!"},
+            {"role": "CHATBOT", "message": "How can I help you today?"},
+        ],
+    }
+    result = handle_cohere_stream_chunk(chunk, prior_text_emitted=True)
     assert result.choices[0].finish_reason == "stop"
+    assert result.choices[0].delta.content is None
 
 
 def test_handle_cohere_stream_chunk_max_tokens():
-    chunk = {"apiFormat": "COHERE", "text": "", "finishReason": "MAX_TOKENS"}
-    result = handle_cohere_stream_chunk(chunk)
+    chunk = {
+        "apiFormat": "COHERE",
+        "text": "truncated full response",
+        "finishReason": "MAX_TOKENS",
+        "chatHistory": [{"role": "CHATBOT", "message": "truncated full response"}],
+    }
+    result = handle_cohere_stream_chunk(chunk, prior_text_emitted=True)
     assert result.choices[0].finish_reason == "length"
+    assert result.choices[0].delta.content is None
 
 
 def test_handle_cohere_stream_chunk_tool_call():
-    chunk = {"apiFormat": "COHERE", "text": "", "finishReason": "TOOL_CALL"}
+    chunk = {
+        "apiFormat": "COHERE",
+        "text": "",
+        "finishReason": "TOOL_CALL",
+        "chatHistory": [{"role": "CHATBOT", "message": ""}],
+    }
     result = handle_cohere_stream_chunk(chunk)
     assert result.choices[0].finish_reason == "tool_calls"
+    assert not result.choices[0].delta.content
+
+
+def test_handle_cohere_stream_chunk_terminal_drops_full_response_text():
+    """Regression for double-output on cohere.command-* streaming.
+
+    OCI's terminal SSE event re-sends the full assembled response in `text`
+    alongside a populated `chatHistory`. That text must be dropped — otherwise
+    it gets concatenated onto the already-streamed incremental deltas. The
+    caller signals "prior deltas already emitted text" via
+    ``prior_text_emitted=True``.
+    """
+    chunk = {
+        "apiFormat": "COHERE",
+        "text": "How can I help you today?",
+        "finishReason": "COMPLETE",
+        "chatHistory": [
+            {"role": "USER", "message": "Hello!"},
+            {"role": "CHATBOT", "message": "How can I help you today?"},
+        ],
+    }
+    result = handle_cohere_stream_chunk(chunk, prior_text_emitted=True)
+    assert result.choices[0].delta.content is None
+
+
+def test_handle_cohere_stream_chunk_single_event_stream_preserves_text():
+    """Degenerate single-event stream: the terminal chunk carries the only copy
+    of the response text. Without prior text deltas, suppressing here would
+    discard the response entirely — so the text must pass through."""
+    chunk = {
+        "apiFormat": "COHERE",
+        "text": "Short answer.",
+        "finishReason": "COMPLETE",
+        "chatHistory": [{"role": "CHATBOT", "message": "Short answer."}],
+    }
+    result = handle_cohere_stream_chunk(chunk, prior_text_emitted=False)
+    assert result.choices[0].delta.content == "Short answer."
+    assert result.choices[0].finish_reason == "stop"
+
+
+def test_handle_cohere_stream_chunk_incremental_passes_text_through():
+    """Non-terminal chunks (no chatHistory) must emit their incremental text."""
+    chunk = {
+        "apiFormat": "COHERE",
+        "text": "How can I ",
+        "finishReason": None,
+    }
+    result = handle_cohere_stream_chunk(chunk)
+    assert result.choices[0].delta.content == "How can I "
+    assert result.choices[0].finish_reason is None
+
+
+def test_handle_cohere_stream_chunk_finish_reason_without_chathistory_keeps_text():
+    """`finishReason` alone (no `chatHistory`) must NOT trigger the drop —
+    `chatHistory` is the discriminator for the consolidated terminal event."""
+    chunk = {
+        "apiFormat": "COHERE",
+        "text": "tail delta",
+        "finishReason": "COMPLETE",
+    }
+    result = handle_cohere_stream_chunk(chunk)
+    assert result.choices[0].delta.content == "tail delta"
+    assert result.choices[0].finish_reason == "stop"
 
 
 # ===========================================================================
@@ -653,6 +779,21 @@ class TestOCIChatConfigGetCompleteUrl:
             litellm_params={},
         )
         assert url == "https://custom.endpoint.com/20231130/actions/chat"
+
+    def test_full_chat_url_is_not_doubled(self):
+        config = OCIChatConfig()
+        full_url = (
+            "https://inference.generativeai.us-chicago-1.oci.oraclecloud.com"
+            "/20231130/actions/chat"
+        )
+        url = config.get_complete_url(
+            api_base=full_url,
+            api_key=None,
+            model=_GENERIC_MODEL,
+            optional_params={},
+            litellm_params={},
+        )
+        assert url == full_url
 
 
 class TestOCIChatConfigGetErrorClass:
@@ -746,6 +887,34 @@ class TestOCIChatConfigGetOptionalParams:
             OCIVendors.GENERIC, {"tool_choice": "required"}
         )
         assert result["toolChoice"] == {"type": "REQUIRED"}
+
+    def test_tool_choice_openai_function_dict_converted_to_oci_form(self):
+        config = self._config()
+        result = config._get_optional_params(
+            OCIVendors.GENERIC,
+            {
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "my_func"},
+                }
+            },
+        )
+        assert result["toolChoice"] == {"type": "FUNCTION", "name": "my_func"}
+
+    def test_tool_choice_flat_function_dict_uppercased(self):
+        config = self._config()
+        result = config._get_optional_params(
+            OCIVendors.GENERIC,
+            {"tool_choice": {"type": "function", "name": "my_func"}},
+        )
+        assert result["toolChoice"] == {"type": "FUNCTION", "name": "my_func"}
+
+    def test_tool_choice_dict_auto_uppercased(self):
+        config = self._config()
+        result = config._get_optional_params(
+            OCIVendors.GENERIC, {"tool_choice": {"type": "auto"}}
+        )
+        assert result["toolChoice"] == {"type": "AUTO"}
 
     def test_response_format_json_generic(self):
         config = self._config()
@@ -897,6 +1066,29 @@ class TestOCIStreamWrapperChunkCreator:
         wrapper = self._make_wrapper(_GENERIC_MODEL)
         with pytest.raises(ValueError, match="not a string"):
             wrapper.chunk_creator({"bad": "type"})
+
+    def test_empty_string_content_does_not_mark_text_emitted(self):
+        # An intermediate Cohere chunk carrying `text=""` must not flip the
+        # _cohere_text_emitted flag — otherwise a subsequent terminal
+        # consolidation chunk would have its real text suppressed as a
+        # "duplicate" and the response would be lost.
+        wrapper = self._make_wrapper(_COHERE_MODEL)
+        empty_payload = json.dumps(
+            {"apiFormat": "COHERE", "text": "", "finishReason": None}
+        )
+        wrapper.chunk_creator(f"data:{empty_payload}")
+        assert wrapper._cohere_text_emitted is False
+
+        terminal_payload = json.dumps(
+            {
+                "apiFormat": "COHERE",
+                "text": "Hello world",
+                "finishReason": "COMPLETE",
+                "chatHistory": [{"role": "CHATBOT", "message": "Hello world"}],
+            }
+        )
+        result = wrapper.chunk_creator(f"data:{terminal_payload}")
+        assert result.choices[0].delta.content == "Hello world"
 
 
 # ===========================================================================

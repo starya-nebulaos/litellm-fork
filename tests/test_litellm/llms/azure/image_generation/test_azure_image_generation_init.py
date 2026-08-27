@@ -1,15 +1,10 @@
 import json
-import os
-import sys
 import traceback
 from typing import Callable, Optional
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
-sys.path.insert(
-    0, os.path.abspath("../../../../..")
-)  # Adds the parent directory to the system path
 import litellm
 from litellm.llms.azure.azure import AzureChatCompletion
 from litellm.llms.azure.image_generation.http_utils import (
@@ -55,6 +50,22 @@ def test_azure_providers_image_generation_json_body_keeps_model():
     data = {"model": "flux.2-pro", "prompt": "x"}
     out = azure_deployment_image_generation_json_body(api, data)
     assert out == data
+
+
+def test_azure_image_generation_mai_base_model_uses_mai_url():
+    azure_chat = AzureChatCompletion()
+    url = azure_chat.create_azure_base_url(
+        azure_client_params={
+            "azure_endpoint": "https://my-resource.services.ai.azure.com",
+            "api_version": "preview",
+        },
+        model="image-deployment-alias",
+        base_model="MAI-Image-2.5",
+    )
+    assert (
+        url
+        == "https://my-resource.services.ai.azure.com/mai/v1/images/generations?api-version=preview"
+    )
 
 
 def test_azure_image_generation_flattens_extra_body():
@@ -296,7 +307,6 @@ def test_azure_image_generation_base_model_vs_deployment_name():
       model: azure/gpt-image-15  # deployment name (URL only)
       base_model: gpt-image-1.5  # optional, for LiteLLM metadata
     """
-    from unittest.mock import MagicMock
 
     # Setup test parameters
     azure_chat_completion = AzureChatCompletion()
@@ -369,7 +379,6 @@ async def test_azure_aimage_generation_base_model_vs_deployment_name():
     Async variant of test_azure_image_generation_base_model_vs_deployment_name:
     deployment in URL, no ``model`` in the JSON body sent to Azure.
     """
-    from unittest.mock import MagicMock
 
     # Setup test parameters
     azure_chat_completion = AzureChatCompletion()
