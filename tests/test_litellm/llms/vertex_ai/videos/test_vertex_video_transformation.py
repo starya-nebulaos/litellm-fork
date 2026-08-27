@@ -10,6 +10,7 @@ from unittest.mock import MagicMock, Mock, patch
 import httpx
 import pytest
 
+import litellm
 from litellm.llms.vertex_ai.videos.transformation import (
     VertexAIVideoConfig,
     _convert_image_to_vertex_format,
@@ -93,22 +94,15 @@ class TestVertexAIVideoConfig:
         # Should NOT include endpoint
         assert not url.endswith(":predictLongRunning")
 
-    def test_get_complete_url_missing_project(self):
+    def test_get_complete_url_missing_project(self, monkeypatch):
         """Test that missing vertex_project raises error."""
-        litellm_params = {}
+        monkeypatch.delenv("VERTEXAI_PROJECT", raising=False)
+        monkeypatch.setattr(litellm, "vertex_project", None)
 
-        # Note: The method might not raise if vertex_project can be fetched from env
-        # This test verifies the behavior when completely missing
-        try:
-            url = self.config.get_complete_url(
-                model="veo-002", api_base=None, litellm_params=litellm_params
+        with pytest.raises(ValueError, match="vertex_project is required"):
+            self.config.get_complete_url(
+                model="veo-002", api_base=None, litellm_params={}
             )
-            # If no error is raised, vertex_project was obtained from environment
-            # In that case, just verify a URL was returned
-            assert url is not None
-        except ValueError as e:
-            # Expected behavior when vertex_project is truly missing
-            assert "vertex_project is required" in str(e)
 
     def test_get_complete_url_default_location(self):
         """Test URL construction with default location."""
@@ -455,6 +449,128 @@ class TestVertexAIVideoConfig:
             self.config.transform_video_content_response(
                 raw_response=mock_response, logging_obj=self.mock_logging_obj
             )
+
+    def test_get_video_edit_prefetch_params(self):
+        """Test that prefetch params returns the fetchPredictOperation URL and body."""
+        operation_name = "projects/test-project/locations/us-central1/publishers/google/models/veo-3.1-generate-001/operations/op-123"
+        api_base = "https://us-central1-aiplatform.googleapis.com/v1/projects/test-project/locations/us-central1/publishers/google/models"
+
+        fetch_url, fetch_body = self.config.get_video_edit_prefetch_params(
+            video_id=operation_name,
+            api_base=api_base,
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+        )
+
+        assert "fetchPredictOperation" in fetch_url
+        assert "veo-3.1-generate-001" in fetch_url
+        assert fetch_body == {"operationName": operation_name}
+
+    def test_transform_video_edit_request_with_bytes(self):
+        """Test video edit request builds predictLongRunning body from pre-fetched bytes."""
+        operation_name = "projects/test-project/locations/us-central1/publishers/google/models/veo-3.1-generate-001/operations/op-123"
+        api_base = "https://us-central1-aiplatform.googleapis.com/v1/projects/test-project/locations/us-central1/publishers/google/models"
+        fake_bytes = base64.b64encode(b"fake_video").decode()
+
+        prefetched = {
+            "done": True,
+            "response": {
+                "videos": [{"bytesBase64Encoded": fake_bytes, "mimeType": "video/mp4"}]
+            },
+        }
+
+        url, data, files = self.config.transform_video_edit_request(
+            prompt="Make it brighter",
+            video_id=operation_name,
+            api_base=api_base,
+            litellm_params=GenericLiteLLMParams(),
+            headers={"Authorization": "Bearer token"},
+            prefetched_source_data=prefetched,
+        )
+
+        assert files is None
+        assert url.endswith(":predictLongRunning")
+        assert "veo-3.1-generate-001" in url
+        instance = data["instances"][0]
+        assert instance["prompt"] == "Make it brighter"
+        assert instance["video"]["bytesBase64Encoded"] == fake_bytes
+        assert instance["video"]["mimeType"] == "video/mp4"
+
+    def test_transform_video_edit_request_with_gcs_uri(self):
+        """Test that gcsUri is used when present in source video."""
+        operation_name = "projects/test-project/locations/us-central1/publishers/google/models/veo-3.1-generate-001/operations/op-456"
+        api_base = "https://us-central1-aiplatform.googleapis.com/v1/projects/test-project/locations/us-central1/publishers/google/models"
+
+        prefetched = {
+            "done": True,
+            "response": {
+                "videos": [{"gcsUri": "gs://bucket/video.mp4", "mimeType": "video/mp4"}]
+            },
+        }
+
+        _, data, _ = self.config.transform_video_edit_request(
+            prompt="Make it darker",
+            video_id=operation_name,
+            api_base=api_base,
+            litellm_params=GenericLiteLLMParams(),
+            headers={},
+            prefetched_source_data=prefetched,
+        )
+
+        assert data["instances"][0]["video"] == {"gcsUri": "gs://bucket/video.mp4"}
+
+    def test_transform_video_edit_request_source_not_done_raises(self):
+        """Test that editing an in-progress video raises a clear error."""
+        operation_name = "projects/test-project/locations/us-central1/publishers/google/models/veo-3.1-generate-001/operations/op-789"
+        api_base = "https://us-central1-aiplatform.googleapis.com/v1/projects/test-project/locations/us-central1/publishers/google/models"
+
+        with pytest.raises(ValueError, match="not complete yet"):
+            self.config.transform_video_edit_request(
+                prompt="Make it brighter",
+                video_id=operation_name,
+                api_base=api_base,
+                litellm_params=GenericLiteLLMParams(),
+                headers={},
+                prefetched_source_data={"done": False},
+            )
+
+    def test_transform_video_edit_response(self):
+        """Test that edit response returns a processing VideoObject with encoded ID."""
+        operation_name = "projects/test-project/locations/us-central1/publishers/google/models/veo-3.1-generate-001/operations/new-op-123"
+        mock_response = Mock(spec=httpx.Response)
+        mock_response.json.return_value = {"name": operation_name}
+
+        video_obj = self.config.transform_video_edit_response(
+            raw_response=mock_response,
+            logging_obj=self.mock_logging_obj,
+            custom_llm_provider="vertex_ai",
+        )
+
+        assert isinstance(video_obj, VideoObject)
+        assert video_obj.status == "processing"
+        assert video_obj.id
+        assert video_obj.model == "veo-3.1-generate-001"
+
+    def test_transform_video_edit_response_includes_usage_for_cost(self):
+        """Edit responses include duration/resolution usage for spend accounting."""
+        operation_name = "projects/test-project/locations/us-central1/publishers/google/models/veo-3.1-generate-001/operations/new-op-123"
+        mock_response = Mock(spec=httpx.Response)
+        mock_response.json.return_value = {"name": operation_name}
+        request_data = {
+            "instances": [{"prompt": "Make it brighter", "video": {}}],
+            "parameters": {"durationSeconds": 8, "resolution": "1080p"},
+        }
+
+        video_obj = self.config.transform_video_edit_response(
+            raw_response=mock_response,
+            logging_obj=self.mock_logging_obj,
+            custom_llm_provider="vertex_ai",
+            request_data=request_data,
+        )
+
+        assert video_obj.usage is not None
+        assert video_obj.usage["duration_seconds"] == 8.0
+        assert video_obj.usage["video_resolution"] == "1080p"
 
     def test_transform_video_remix_request_not_supported(self):
         """Test that video remix raises NotImplementedError."""

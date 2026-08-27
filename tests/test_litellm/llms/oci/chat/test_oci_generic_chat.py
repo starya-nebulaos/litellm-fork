@@ -2,7 +2,6 @@
 Unit tests for litellm/llms/oci/chat/generic.py — error paths and stream handling.
 """
 
-import json
 import pytest
 from unittest.mock import MagicMock
 
@@ -16,7 +15,12 @@ from litellm.llms.oci.chat.generic import (
     handle_generic_response,
     handle_generic_stream_chunk,
 )
-from litellm.llms.oci.chat.transformation import OCIChatConfig, OCIStreamWrapper
+from litellm.llms.oci.chat.transformation import (
+    OCIChatConfig,
+    OCIStreamWrapper,
+    OCIVendors,
+    _model_uses_max_completion_tokens,
+)
 from litellm.llms.oci.common_utils import OCIError
 
 # ---------------------------------------------------------------------------
@@ -102,7 +106,7 @@ class TestGenericToolCallErrors:
             )
 
     def test_non_string_id_raises(self):
-        with pytest.raises(OCIError, match="id.*must be a string"):
+        with pytest.raises(OCIError, match=r"id.*must be a string"):
             adapt_messages_to_generic_oci_standard_tool_call(
                 "assistant",
                 [
@@ -122,7 +126,7 @@ class TestGenericToolCallErrors:
             )
 
     def test_non_string_function_name_raises(self):
-        with pytest.raises(OCIError, match="function.name.*must be a string"):
+        with pytest.raises(OCIError, match=r"function\.name.*must be a string"):
             adapt_messages_to_generic_oci_standard_tool_call(
                 "assistant",
                 [
@@ -135,7 +139,7 @@ class TestGenericToolCallErrors:
             )
 
     def test_non_string_arguments_raises(self):
-        with pytest.raises(OCIError, match="arguments.*must be a JSON string"):
+        with pytest.raises(OCIError, match=r"arguments.*must be a JSON string"):
             adapt_messages_to_generic_oci_standard_tool_call(
                 "assistant",
                 [
@@ -271,7 +275,6 @@ class TestHandleGenericStreamChunk:
         assert result.choices[0].index == 0
 
     def test_image_content_in_stream_raises(self):
-        from litellm.types.llms.oci import OCIImageContentPart, OCIImageUrl, OCIMessage
 
         chunk = {
             "apiFormat": "GENERIC",
@@ -337,27 +340,81 @@ class TestOCIStreamWrapperChunkCreator:
 # ---------------------------------------------------------------------------
 
 
-class TestGpt5MaxCompletionTokens:
-    def test_helper_detects_gpt5_family(self):
-        from litellm.llms.oci.chat.transformation import (
-            _model_uses_max_completion_tokens,
-        )
+@pytest.fixture
+def _register_oci_gpt5_in_catalog():
+    """Guarantee OCI GPT-5 catalog entries with supports_reasoning=True are
+    present for the duration of the test, regardless of whether
+    ``litellm.model_cost`` was populated from the bundled
+    ``model_prices_and_context_window.json`` (which ships them) or from a
+    remote map that may lag behind.
+    """
+    import litellm
 
+    needed = {
+        "oci/openai.gpt-5",
+        "oci/openai.gpt-5-mini",
+        "oci/openai.gpt-5-nano",
+    }
+    added = []
+    for key in needed:
+        if key not in litellm.model_cost:
+            litellm.model_cost[key] = {
+                "litellm_provider": "oci",
+                "mode": "chat",
+                "supports_reasoning": True,
+            }
+            added.append(key)
+    yield
+    for key in added:
+        litellm.model_cost.pop(key, None)
+
+
+class TestGpt5MaxCompletionTokens:
+    def test_helper_detects_gpt5_family(self, _register_oci_gpt5_in_catalog):
         assert _model_uses_max_completion_tokens("openai.gpt-5") is True
         assert _model_uses_max_completion_tokens("openai.gpt-5-mini") is True
         assert _model_uses_max_completion_tokens("openai.gpt-5-nano") is True
-        assert _model_uses_max_completion_tokens("openai.gpt-5.5") is True
         assert _model_uses_max_completion_tokens("oci/openai.gpt-5") is True
 
-        assert _model_uses_max_completion_tokens("openai.gpt-4o") is False
-        assert _model_uses_max_completion_tokens("openai.gpt-4.1") is False
+        assert _model_uses_max_completion_tokens("openai.gpt-oss-120b") is False
         assert _model_uses_max_completion_tokens("meta.llama-3.3-70b-instruct") is False
         assert _model_uses_max_completion_tokens("cohere.command-latest") is False
         assert _model_uses_max_completion_tokens("") is False
 
-    def test_gpt5_routes_max_tokens_to_max_completion_tokens(self):
-        from litellm.llms.oci.chat.transformation import OCIChatConfig, OCIVendors
+    def test_helper_covers_openai_models_absent_from_catalog(self):
+        """OCI keeps adding OpenAI models (gpt-4.1, gpt-5.1..5.5, o-series)
+        faster than the litellm catalog tracks them. The vendor-prefix rule
+        must route them to maxCompletionTokens even with no catalog entry,
+        since OpenAI accepts max_completion_tokens on every chat model while
+        the reasoning families hard-reject max_tokens."""
+        import litellm
 
+        for name in (
+            "openai.gpt-5.2",
+            "openai.gpt-4.1",
+            "openai.o3",
+            "oci/openai.gpt-5.1-codex",
+        ):
+            assert f"oci/{name.removeprefix('oci/')}" not in litellm.model_cost
+            assert _model_uses_max_completion_tokens(name) is True
+
+        assert _model_uses_max_completion_tokens("openai.gpt-oss-20b") is False
+
+    def test_default_injection_uses_max_completion_tokens_for_uncataloged_gpt(self):
+        """Regression: with the injected default maxTokens, a GPT model absent
+        from the catalog got "maxTokens" on every request and OCI returned 400
+        ("Use 'max_completion_tokens' instead") even when the caller never set
+        max_tokens."""
+        from litellm.constants import DEFAULT_OCI_CHAT_MAX_TOKENS
+
+        cfg = OCIChatConfig()
+        out = cfg._get_optional_params(OCIVendors.GENERIC, {}, model="openai.gpt-5.2")
+        assert out.get("maxCompletionTokens") == DEFAULT_OCI_CHAT_MAX_TOKENS
+        assert "maxTokens" not in out
+
+    def test_gpt5_routes_max_tokens_to_max_completion_tokens(
+        self, _register_oci_gpt5_in_catalog
+    ):
         cfg = OCIChatConfig()
         # Both shapes optional_params can take after upstream map_openai_params:
         # 1. openai-side key still present
@@ -369,19 +426,27 @@ class TestGpt5MaxCompletionTokens:
 
         # 2. already pre-translated to OCI alias
         out_b = cfg._get_optional_params(
-            OCIVendors.GENERIC, {"maxTokens": 64}, model="openai.gpt-5.5"
+            OCIVendors.GENERIC, {"maxTokens": 64}, model="openai.gpt-5-mini"
         )
         assert out_b.get("maxCompletionTokens") == 64
         assert "maxTokens" not in out_b
 
     def test_non_gpt5_keeps_max_tokens(self):
-        from litellm.llms.oci.chat.transformation import OCIChatConfig, OCIVendors
-
         cfg = OCIChatConfig()
         out = cfg._get_optional_params(
             OCIVendors.GENERIC,
             {"max_tokens": 64},
             model="meta.llama-3.3-70b-instruct",
+        )
+        assert out.get("maxTokens") == 64
+        assert "maxCompletionTokens" not in out
+
+    def test_cohere_reasoning_model_keeps_max_tokens(self):
+        cfg = OCIChatConfig()
+        out = cfg._get_optional_params(
+            OCIVendors.COHERE,
+            {"max_tokens": 64},
+            model="cohere.command-a-reasoning",
         )
         assert out.get("maxTokens") == 64
         assert "maxCompletionTokens" not in out

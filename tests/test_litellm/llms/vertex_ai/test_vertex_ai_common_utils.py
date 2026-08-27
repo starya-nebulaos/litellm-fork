@@ -1,14 +1,9 @@
-import os
-import sys
 from unittest.mock import patch
 
 import pytest
 
 from litellm.constants import DEFAULT_MAX_RECURSE_DEPTH
 
-sys.path.insert(
-    0, os.path.abspath("../../..")
-)  # Adds the parent directory to the system path
 
 from litellm.llms.vertex_ai.common_utils import (
     _get_vertex_url,
@@ -17,8 +12,24 @@ from litellm.llms.vertex_ai.common_utils import (
     get_vertex_project_id_from_url,
     pop_vertex_request_labels,
     set_schema_property_ordering,
+    supports_response_json_schema,
+    validate_vertex_location,
     vertex_request_labels_from_litellm_params,
 )
+
+
+@pytest.mark.parametrize("location", ["us", "eu", "us-central1", "europe-west1", "global"])
+def test_validate_vertex_location_accepts_valid(location):
+    assert validate_vertex_location(location) == location
+
+
+@pytest.mark.parametrize(
+    "location",
+    ["attacker.example/", "evil.com#", "us.attacker.example", "us/../..", "US", "us_central1", "-us", "", None],
+)
+def test_validate_vertex_location_rejects_invalid(location):
+    with pytest.raises(ValueError, match=r"vertex_location is required|Invalid vertex_location format"):
+        validate_vertex_location(location)
 
 
 @pytest.mark.asyncio
@@ -148,6 +159,23 @@ async def test_get_supports_system_message():
         model="random-model-name", custom_llm_provider="vertex_ai"
     )
     assert result == False
+
+
+@pytest.mark.parametrize(
+    "model, expected",
+    [
+        ("gemini-2.0-flash", True),
+        ("gemini-1.5-pro", False),
+        ("random-model-name", False),
+        ("gemini-3-flash-preview", True),
+        ("gemini-123-pro", True),
+        ("vertex_ai/gemini-3.1-pro-preview", True),
+    ],
+)
+def test_supports_response_json_schema(model: str, expected: bool):
+    """Test supports_response_json_schema correctly detects Gemini 2.0+ model names"""
+
+    assert supports_response_json_schema(model) == expected
 
 
 def test_set_schema_property_ordering_with_excessive_nesting():
@@ -1243,6 +1271,85 @@ async def test_vertex_ai_token_counter_routes_gemini_models():
 
 
 @pytest.mark.asyncio
+async def test_vertex_ai_token_counter_converts_messages_to_contents_for_gemini():
+    """
+    Regression test for #36921: acount_tokens passed contents=None to the
+    Gemini countTokens endpoint when called with messages=, causing a
+    silent zero token count. Verify messages are converted to Gemini
+    contents format when contents is None.
+    """
+    from unittest.mock import patch
+
+    from litellm.llms.vertex_ai.common_utils import VertexAITokenCounter
+
+    token_counter = VertexAITokenCounter()
+
+    with patch(
+        "litellm.llms.vertex_ai.count_tokens.handler.VertexAITokenCounter.acount_tokens"
+    ) as mock_acount_tokens:
+        mock_acount_tokens.return_value = {
+            "totalTokens": 42,
+            "tokenizer_used": "gemini",
+        }
+
+        await token_counter.count_tokens(
+            model_to_use="gemini-2.5-flash",
+            messages=[{"role": "user", "content": "Hello, how are you?"}],
+            contents=None,
+            deployment={
+                "litellm_params": {
+                    "vertex_project": "test-project",
+                    "vertex_location": "us-central1",
+                }
+            },
+            request_model="vertex_ai/gemini-2.5-flash",
+        )
+
+        mock_acount_tokens.assert_called_once()
+        call_kwargs = mock_acount_tokens.call_args.kwargs
+        passed_contents = call_kwargs["contents"]
+        assert passed_contents is not None
+        assert isinstance(passed_contents, list)
+        assert len(passed_contents) >= 1
+        assert "parts" in passed_contents[0]
+
+
+@pytest.mark.asyncio
+async def test_vertex_ai_token_counter_returns_none_when_api_omits_total_tokens():
+    """
+    Regression test for #36921: Vertex returns HTTP 200 with no totalTokens
+    when contents is null. The old code read totalTokens with a default of 0
+    and returned a silent zero. Verify we now return None so the caller falls
+    back to local token counting.
+    """
+    from unittest.mock import patch
+
+    from litellm.llms.vertex_ai.common_utils import VertexAITokenCounter
+
+    token_counter = VertexAITokenCounter()
+
+    with patch(
+        "litellm.llms.vertex_ai.count_tokens.handler.VertexAITokenCounter.acount_tokens"
+    ) as mock_acount_tokens:
+        mock_acount_tokens.return_value = {"tokenizer_used": "gemini"}
+
+        result = await token_counter.count_tokens(
+            model_to_use="gemini-2.5-flash",
+            messages=[{"role": "user", "content": "Hello"}],
+            contents=None,
+            deployment={
+                "litellm_params": {
+                    "vertex_project": "test-project",
+                    "vertex_location": "us-central1",
+                }
+            },
+            request_model="vertex_ai/gemini-2.5-flash",
+        )
+
+        assert result is None
+
+
+@pytest.mark.asyncio
 async def test_vertex_ai_partner_model_detection():
     """
     Test that VertexAIPartnerModels.is_vertex_partner_model correctly identifies
@@ -1324,6 +1431,63 @@ def test_vertex_ai_zai_is_partner_model():
     )
 
     assert VertexAIPartnerModels.is_vertex_partner_model("zai-org/glm-4.7-maas")
+
+
+def test_vertex_ai_gemma_maas_is_partner_model():
+    """
+    Ensure Gemma MaaS models are detected as Vertex AI partner models so they
+    route through the OpenAI-compatible /endpoints/openapi path (not the
+    legacy non-gemini path or the vertex_ai/gemma/ predict-endpoint handler).
+    """
+    from litellm.llms.vertex_ai.vertex_ai_partner_models.main import (
+        VertexAIPartnerModels,
+    )
+
+    assert VertexAIPartnerModels.is_vertex_partner_model(
+        "google/gemma-4-26b-a4b-it-maas"
+    )
+
+
+def test_vertex_ai_gemma_maas_uses_openai_handler():
+    """
+    Ensure Gemma MaaS partner models re-use the OpenAI-format handler.
+    """
+    from litellm.llms.vertex_ai.vertex_ai_partner_models.main import (
+        VertexAIPartnerModels,
+    )
+
+    assert VertexAIPartnerModels.should_use_openai_handler(
+        "google/gemma-4-26b-a4b-it-maas"
+    )
+
+
+def test_vertex_ai_gemma_maas_routes_to_partner_models():
+    """
+    Regression guard for owtaylor's worry that Gemma MaaS could be misrouted as
+    a gemma model. get_vertex_ai_model_route must return PARTNER_MODELS, never
+    GEMMA, MODEL_GARDEN, or NON_GEMINI.
+    """
+    from litellm.llms.vertex_ai.common_utils import (
+        VertexAIModelRoute,
+        get_vertex_ai_model_route,
+    )
+
+    route = get_vertex_ai_model_route("google/gemma-4-26b-a4b-it-maas")
+    assert route == VertexAIModelRoute.PARTNER_MODELS
+
+
+def test_vertex_ai_google_gemini_not_detected_as_gemma_maas():
+    """
+    Negative: adding the "google/gemma-" prefix must not widen detection to
+    other google/* models like google/gemini-* (which should keep flowing
+    through the gemini route, not partner_models).
+    """
+    from litellm.llms.vertex_ai.vertex_ai_partner_models.main import (
+        VertexAIPartnerModels,
+    )
+
+    assert not VertexAIPartnerModels.is_vertex_partner_model("google/gemini-1.5-pro")
+    assert not VertexAIPartnerModels.should_use_openai_handler("google/gemini-1.5-pro")
 
 
 def test_build_vertex_schema_empty_properties():
@@ -1469,11 +1633,7 @@ def test_vertex_request_labels_from_litellm_params_extracts_requester_metadata()
 
 
 def test_vertex_request_labels_from_litellm_params_accepts_litellm_metadata():
-    lp = {
-        "litellm_metadata": {
-            "requester_metadata": {"team": "platform", "count": 3}
-        }
-    }
+    lp = {"litellm_metadata": {"requester_metadata": {"team": "platform", "count": 3}}}
     assert vertex_request_labels_from_litellm_params(lp) == {"team": "platform"}
 
 

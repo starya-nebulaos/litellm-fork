@@ -5,6 +5,7 @@ import json
 from unittest.mock import patch, MagicMock
 
 from litellm import ModelResponse
+from litellm.constants import DEFAULT_OCI_CHAT_MAX_TOKENS
 from litellm.llms.oci.chat.cohere import (
     adapt_messages_to_cohere_standard,
     adapt_tool_definitions_to_cohere_standard,
@@ -236,25 +237,30 @@ class TestOCICohereToolCalls:
         assert result.usage.completion_tokens == 22
         assert result.usage.total_tokens == 48
 
-    def test_cohere_request_preserves_json_schema_response_format(self):
-        """Ensure Cohere requests retain JSON schema payloads in responseFormat."""
+    def test_cohere_request_folds_json_schema_into_json_object(self):
+        """A Cohere json_schema must fold the schema onto JSON_OBJECT.
+
+        OCI Cohere has no JSON_SCHEMA type; sending {"type": "JSON_SCHEMA", ...}
+        (or the raw lowercase "json_schema" with a jsonSchema body) is rejected
+        with HTTP 400. The schema rides on JSON_OBJECT instead.
+        """
         config = OCIChatConfig()
         messages = [{"role": "user", "content": "Return structured info"}]
-        response_format = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "test_schema",
-                "strict": True,
-                "schema": {
-                    "type": "object",
-                    "properties": {"foo": {"type": "string"}},
-                    "required": ["foo"],
-                },
-            },
+        schema = {
+            "type": "object",
+            "properties": {"foo": {"type": "string"}},
+            "required": ["foo"],
         }
         optional_params = {
             "oci_compartment_id": TEST_COMPARTMENT_ID,
-            "response_format": response_format,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "test_schema",
+                    "strict": True,
+                    "schema": schema,
+                },
+            },
         }
 
         transformed_request = config.transform_request(
@@ -265,18 +271,14 @@ class TestOCICohereToolCalls:
             headers={},
         )
 
-        chat_request = transformed_request["chatRequest"]
-        assert chat_request["apiFormat"] == "COHERE"
-        assert "responseFormat" in chat_request
-
-        cohere_response_format = chat_request["responseFormat"]
-        assert cohere_response_format["type"] == "json_schema"
+        cohere_response_format = transformed_request["chatRequest"]["responseFormat"]
+        assert cohere_response_format["type"] == "JSON_OBJECT"
+        assert "jsonSchema" not in cohere_response_format
         assert "json_schema" not in cohere_response_format
-        assert "jsonSchema" in cohere_response_format
-        assert cohere_response_format["jsonSchema"] == response_format["json_schema"]
+        assert cohere_response_format["schema"] == schema
 
-    def test_cohere_request_response_format_text_stays_lowercase(self):
-        """Ensure Cohere keeps response_format type lowercase (e.g. 'text' not 'TEXT')."""
+    def test_cohere_request_response_format_text_is_uppercased(self):
+        """Cohere response_format type 'text' maps to OCI's canonical 'TEXT'."""
         config = OCIChatConfig()
         messages = [{"role": "user", "content": "Hello"}]
         optional_params = {
@@ -292,10 +294,7 @@ class TestOCICohereToolCalls:
             headers={},
         )
 
-        chat_request = transformed_request["chatRequest"]
-        assert chat_request["apiFormat"] == "COHERE"
-        assert "responseFormat" in chat_request
-        assert chat_request["responseFormat"]["type"] == "text"
+        assert transformed_request["chatRequest"]["responseFormat"] == {"type": "TEXT"}
 
     def test_cohere_tool_call_only_message_no_text(self):
         """Test chat history with an assistant message that has tool calls but no text content."""
@@ -326,20 +325,24 @@ class TestOCICohereToolCalls:
 
         chat_history = adapt_messages_to_cohere_standard(messages)
 
-        # First message is the user message
-        assert chat_history[0].role == "USER"
-        assert chat_history[0].message == "What's the weather?"
+        # The last user message is consumed by the request's top-level `message`
+        # field, so chatHistory carries the assistant tool call and tool result.
+        assert len(chat_history) == 2
 
-        # Second message is the assistant with tool calls and no text
-        assistant_msg = chat_history[1]
+        assistant_msg = chat_history[0]
         assert assistant_msg.role == "CHATBOT"
         assert assistant_msg.message is None or assistant_msg.message == ""
         assert assistant_msg.toolCalls is not None
         assert len(assistant_msg.toolCalls) == 1
         assert assistant_msg.toolCalls[0].name == "get_weather"
 
+        tool_msg = chat_history[1]
+        assert tool_msg.role == "TOOL"
+        assert tool_msg.toolResults[0].call.name == "get_weather"
+        assert tool_msg.toolResults[0].outputs[0]["output"] == "Sunny, 25C"
+
     def test_cohere_chat_history_with_tool_calls(self):
-        """Test chat history transformation with tool calls"""
+        """Tool results trailing the last user turn must be preserved in chatHistory."""
         config = OCIChatConfig()
 
         messages = [
@@ -367,26 +370,27 @@ class TestOCICohereToolCalls:
 
         chat_history = adapt_messages_to_cohere_standard(messages)
 
-        # Verify chat history structure (excludes last message)
+        # The last user message becomes the request's top-level `message`.
+        # Everything else — including the trailing tool result — must remain in
+        # chatHistory so the model can see the tool output.
         assert len(chat_history) == 2
 
-        # Check user message
-        user_msg = chat_history[0]
-        assert user_msg.role == "USER"
-        assert user_msg.message == "What's the weather like in Tokyo?"
-
-        # Check assistant message with tool calls
-        assistant_msg = chat_history[1]
+        assistant_msg = chat_history[0]
         assert assistant_msg.role == "CHATBOT"
         assert assistant_msg.message == "I will look up the weather in Tokyo."
         assert assistant_msg.toolCalls is not None
         assert len(assistant_msg.toolCalls) == 1
         assert assistant_msg.toolCalls[0].name == "get_weather"
-        # The parameters should be parsed as JSON
         assert assistant_msg.toolCalls[0].parameters == {"location": "Tokyo"}
 
-        # Note: The tool message (last message) is excluded from chat history
-        # This is the expected behavior for Cohere models
+        tool_msg = chat_history[1]
+        assert tool_msg.role == "TOOL"
+        assert tool_msg.toolResults[0].call.name == "get_weather"
+        assert tool_msg.toolResults[0].call.parameters == {"location": "Tokyo"}
+        assert (
+            tool_msg.toolResults[0].outputs[0]["output"]
+            == "The weather in Tokyo is 22°C with partly cloudy skies."
+        )
 
     def test_cohere_streaming_chunk_handling(self):
         """Test Cohere streaming chunk handling"""
@@ -457,7 +461,8 @@ class TestOCICohereToolCalls:
         assert "tool_choice" not in supported_params
 
     def test_cohere_default_parameters(self):
-        """Test that Cohere requests do not inject hardcoded defaults — caller supplies all params."""
+        """maxTokens is defaulted (OCI's server default truncates at ~20 tokens);
+        every other param is still pass-through with no hardcoded default."""
         config = OCIChatConfig()
         messages = [{"role": "user", "content": "Hello"}]
         optional_params = {"oci_compartment_id": TEST_COMPARTMENT_ID}
@@ -472,8 +477,7 @@ class TestOCICohereToolCalls:
 
         chat_request = transformed_request["chatRequest"]
 
-        # No hardcoded defaults injected — only pass through what the user supplies
-        assert "maxTokens" not in chat_request
+        assert chat_request["maxTokens"] == DEFAULT_OCI_CHAT_MAX_TOKENS
         assert "topK" not in chat_request
         assert "topP" not in chat_request
         assert "frequencyPenalty" not in chat_request
@@ -552,6 +556,50 @@ class TestOCICohereToolCalls:
         assert result.choices[0].message.tool_calls is not None
         assert len(result.choices[0].message.tool_calls) == 1
         assert result.choices[0].message.tool_calls[0].function.name == "get_weather"
+
+    def test_cohere_response_unknown_finish_reason_degrades_to_stop(self):
+        """A future/unknown finishReason in non-streaming responses must
+        degrade to ``stop`` via ``handle_cohere_response``'s fallback
+        rather than crash Pydantic validation. Mirrors the streaming
+        handler's behavior. See bug caf74429.
+        """
+        config = OCIChatConfig()
+
+        mock_cohere_response = {
+            "modelId": "cohere.command-latest",
+            "modelVersion": "1.0",
+            "chatResponse": {
+                "apiFormat": "COHERE",
+                "text": "hello",
+                "finishReason": "FUTURE_REASON_NOT_YET_KNOWN",
+                "usage": {
+                    "promptTokens": 1,
+                    "completionTokens": 1,
+                    "totalTokens": 2,
+                },
+            },
+        }
+
+        response = httpx.Response(
+            status_code=200,
+            json=mock_cohere_response,
+            headers={"Content-Type": "application/json"},
+        )
+
+        result = config.transform_response(
+            model="cohere.command-latest",
+            raw_response=response,
+            model_response=ModelResponse(),
+            logging_obj={},  # type: ignore
+            request_data={},
+            messages=[],
+            optional_params={},
+            litellm_params={},
+            encoding={},
+        )
+
+        assert isinstance(result, ModelResponse)
+        assert result.choices[0].finish_reason == "stop"
 
     def test_cohere_vendor_detection(self):
         """Test that Cohere models are correctly identified"""
@@ -731,12 +779,18 @@ class TestOCICoherePreambleOverride:
             {"role": "assistant", "content": "First answer"},
             {"role": "user", "content": "Second question"},
         ]
+        optional_params = {"oci_compartment_id": TEST_COMPARTMENT_ID}
 
-        chat_history = adapt_messages_to_cohere_standard(messages)
+        result = config.transform_request(
+            model="cohere.command-latest",
+            messages=messages,  # type: ignore
+            optional_params=optional_params,
+            litellm_params={},
+            headers={},
+        )
 
-        # Should contain user and assistant only, no system
-        # Note: adapt_messages_to_cohere_standard excludes the last message
-        roles = [msg.role for msg in chat_history]
+        chat_request = result["chatRequest"]
+        roles = [msg["role"] for msg in chat_request["chatHistory"]]
         assert "SYSTEM" not in roles
         assert roles == ["USER", "CHATBOT"]
 
@@ -876,10 +930,12 @@ class TestOCICohereStreaming:
 
     def test_cohere_streaming_non_json_chunk(self):
         """Test error handling for non-JSON chunk"""
+        from litellm.llms.oci.common_utils import OCIError
+
         stream_wrapper = self._create_stream_wrapper()
 
         # Test non-JSON chunk
-        with pytest.raises(json.JSONDecodeError):
+        with pytest.raises(OCIError, match="Chunk cannot be parsed as JSON"):
             stream_wrapper.chunk_creator("data: invalid json")
 
     def test_cohere_streaming_generic_chunk_fallback(self):

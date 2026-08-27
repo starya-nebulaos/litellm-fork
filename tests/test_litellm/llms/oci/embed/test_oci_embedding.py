@@ -1,12 +1,10 @@
 import json
 import os
-import sys
 from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
 
-sys.path.insert(0, os.path.abspath("../../../../.."))
 
 from litellm.llms.oci.embed.transformation import OCIEmbeddingConfig
 from litellm.types.utils import EmbeddingResponse
@@ -76,7 +74,7 @@ class TestOCIEmbeddingConfig:
         assert "embedText" in url
 
     def test_get_complete_url_custom_api_base(self):
-        """test_get_complete_url returns api_base as-is when provided."""
+        """test_get_complete_url treats api_base as a base URL and appends the embedText path."""
         config = OCIEmbeddingConfig()
         custom_base = "https://custom.oci.example.com/embed"
         url = config.get_complete_url(
@@ -86,7 +84,7 @@ class TestOCIEmbeddingConfig:
             optional_params={},
             litellm_params={},
         )
-        assert url == custom_base
+        assert url == f"{custom_base}/20231130/actions/embedText"
 
     def test_get_supported_openai_params(self):
         """test_get_supported_openai_params returns expected params list."""
@@ -123,25 +121,22 @@ class TestOCIEmbeddingConfig:
         assert "litellm" in result["user-agent"]
 
     def test_validate_environment_missing_credentials(self):
-        """test validate_environment sets headers even with incomplete credentials.
+        """test validate_environment raises OCIError when required credentials are missing."""
+        from litellm.llms.oci.common_utils import OCIError
 
-        Credential validation is deferred to signing time — validate_environment only
-        populates common HTTP headers (content-type, user-agent).
-        """
         config = OCIEmbeddingConfig()
         incomplete_params = {
             "oci_user": "ocid1.user.oc1..xxx",
             # Missing oci_fingerprint, oci_tenancy, oci_key/oci_key_file, oci_compartment_id
         }
-        result = config.validate_environment(
-            headers={},
-            model=TEST_MODEL,
-            messages=[],
-            optional_params=incomplete_params,
-            litellm_params={},
-        )
-        assert result["content-type"] == "application/json"
-        assert "litellm" in result["user-agent"]
+        with pytest.raises(OCIError, match="Missing required parameters"):
+            config.validate_environment(
+                headers={},
+                model=TEST_MODEL,
+                messages=[],
+                optional_params=incomplete_params,
+                litellm_params={},
+            )
 
     def test_validate_environment_with_signer(self):
         """test validate_environment passes when oci_signer is provided."""
