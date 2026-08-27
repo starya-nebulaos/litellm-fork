@@ -3262,6 +3262,126 @@ def test_convert_response_output_generic_pydantic_message_item():
     assert choices[0].finish_reason == "stop"
 
 
+def test_convert_response_output_merges_multiblock_message_and_tool_calls_into_choice_zero():
+    """All text blocks, reasoning, and tools from one turn must share choice zero."""
+    from openai.types.responses import (
+        ResponseFunctionToolCall,
+        ResponseOutputMessage,
+        ResponseOutputText,
+    )
+
+    message = ResponseOutputMessage(
+        id="msg_multiblock",
+        content=[
+            ResponseOutputText(
+                annotations=[],
+                text="Vou consultar ",
+                type="output_text",
+                logprobs=[],
+            ),
+            ResponseOutputText(
+                annotations=[],
+                text="o pedido.",
+                type="output_text",
+                logprobs=[],
+            ),
+        ],
+        role="assistant",
+        status="completed",
+        type="message",
+    )
+    reasoning = {
+        "type": "reasoning",
+        "id": "rs_multiblock",
+        "encrypted_content": "encrypted-reasoning",
+        "summary": [{"type": "summary_text", "text": "Preciso consultar o sistema."}],
+    }
+    tool_call = ResponseFunctionToolCall(
+        id="fc_multiblock",
+        type="function_call",
+        status="completed",
+        arguments='{"order_id":"123"}',
+        call_id="call_multiblock",
+        name="get_order",
+    )
+
+    choices = LiteLLMResponsesTransformationHandler._convert_response_output_to_choices(
+        [message, reasoning, tool_call]
+    )
+
+    assert len(choices) == 1
+    choice = choices[0]
+    assert choice.index == 0
+    assert choice.finish_reason == "tool_calls"
+    assert choice.message.content == "Vou consultar o pedido."
+    assert choice.message.reasoning_content == "Preciso consultar o sistema."
+    assert choice.message.reasoning_items[0]["encrypted_content"] == "encrypted-reasoning"
+    assert choice.message.tool_calls[0].id == "call_multiblock"
+    assert choice.message.tool_calls[0].function.name == "get_order"
+
+
+def test_convert_response_output_merges_raw_multiblock_annotations():
+    handler = LiteLLMResponsesTransformationHandler()
+    items = [
+        {
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": "Fonte ",
+                    "annotations": [
+                        {
+                            "type": "url_citation",
+                            "url_citation": {
+                                "start_index": 0,
+                                "end_index": 5,
+                                "title": "Fonte A",
+                                "url": "https://example.com/a",
+                            },
+                        }
+                    ],
+                },
+                {
+                    "type": "output_text",
+                    "text": "confirmada.",
+                    "annotations": [
+                        {
+                            "type": "url_citation",
+                            "url_citation": {
+                                "start_index": 6,
+                                "end_index": 16,
+                                "title": "Fonte B",
+                                "url": "https://example.com/b",
+                            },
+                        }
+                    ],
+                },
+            ],
+        },
+        {
+            "type": "function_call",
+            "id": "fc_raw_multiblock",
+            "call_id": "call_raw_multiblock",
+            "name": "save_result",
+            "arguments": "{}",
+        },
+    ]
+
+    choices = LiteLLMResponsesTransformationHandler._convert_response_output_to_choices(
+        items,
+        handle_raw_dict_callback=handler._handle_raw_dict_response_item,
+    )
+
+    assert len(choices) == 1
+    choice = choices[0]
+    assert choice.index == 0
+    assert choice.finish_reason == "tool_calls"
+    assert choice.message.content == "Fonte confirmada."
+    assert len(choice.message.annotations) == 2
+    assert choice.message.tool_calls[0].id == "call_raw_multiblock"
+
+
 def test_convert_tools_to_responses_format_flattens_nested_custom_tool():
     from litellm.completion_extras.litellm_responses_transformation.transformation import (
         LiteLLMResponsesTransformationHandler,

@@ -293,22 +293,27 @@ class LiteLLMResponsesTransformationHandler(CompletionTransformationBridge):
         # Handle message items with output_text content
         if item_type == "message":
             content_list: Final = item.get("content", [])
+            text_parts: Final[list[str]] = []
+            message_annotations: Final[list[ChatCompletionAnnotation]] = []
             for content_item in content_list:
                 if isinstance(content_item, dict):
                     content_type = content_item.get("type")
                     if content_type == "output_text":
                         response_text = content_item.get("text", "")
-                        # Extract annotations from content if present
+                        text_parts.append(response_text if isinstance(response_text, str) else "")
                         annotations = LiteLLMResponsesTransformationHandler._convert_annotations_to_chat_format(
                             content_item.get("annotations", None)
                         )
-                        msg = Message(
-                            role=item.get("role", "assistant"),
-                            content=response_text if response_text else "",
-                            annotations=annotations,
-                        )
-                        choice = Choices(message=msg, finish_reason="stop", index=index)
-                        return choice, index + 1
+                        if annotations:
+                            message_annotations.extend(annotations)
+            if text_parts:
+                msg = Message(
+                    role=item.get("role", "assistant"),
+                    content="".join(text_parts),
+                    annotations=message_annotations or None,
+                )
+                choice = Choices(message=msg, finish_reason="stop", index=index)
+                return choice, index + 1
 
         # function_call / custom_tool_call dicts are intercepted and accumulated by
         # _convert_response_output_to_choices before this callback is reached
@@ -624,55 +629,30 @@ class LiteLLMResponsesTransformationHandler(CompletionTransformationBridge):
 
         from litellm.types.utils import Choices, Message
 
-        choices: Final[list[Choices]] = []
-        index = 0
-        reasoning_content: str | None = None
-        pending_reasoning_item: _BuiltReasoningItem | None = None
-
-        # Collect all tool calls to put them in a single choice
-        # (Chat Completions API expects all tool calls in one message)
+        text_parts: Final[list[str]] = []
+        accumulated_annotations: Final[list[ChatCompletionAnnotation]] = []
         accumulated_tool_calls: Final[list[Mapping[str, object]]] = []
+        reasoning_items: Final = _reasoning_items_from_output_items(output_items)
+        message_role = "assistant"
+        has_message_item = False
         tool_call_index = 0
 
         for item in output_items:
             if isinstance(item, ResponseReasoningItem):
-                pending_reasoning_item = _build_reasoning_item(
-                    item_id=item.id,
-                    encrypted_content=getattr(item, "encrypted_content", None),
-                    summary_raw=item.summary,
-                )
-                reasoning_content = " ".join(s["text"] for s in pending_reasoning_item["summary"] if s.get("text"))
+                continue
 
             elif isinstance(item, ResponseOutputMessage):
+                has_message_item = True
+                message_role = item.role
                 for content in item.content:
                     response_text = getattr(content, "text", "")
-                    # Extract annotations from content if present
+                    text_parts.append(response_text if isinstance(response_text, str) else "")
                     raw_annotations = getattr(content, "annotations", None)
                     annotations = LiteLLMResponsesTransformationHandler._convert_annotations_to_chat_format(
                         raw_annotations
                     )
-                    msg = Message(
-                        role=item.role,
-                        content=response_text if response_text else "",
-                        reasoning_content=reasoning_content,
-                        annotations=annotations,
-                        reasoning_items=cast(
-                            list[ChatCompletionReasoningItem] | None,
-                            ([pending_reasoning_item] if pending_reasoning_item is not None else None),
-                        ),
-                    )
-
-                    choices.append(
-                        Choices(
-                            message=msg,
-                            finish_reason="stop",
-                            index=index,
-                        )
-                    )
-
-                    reasoning_content = None  # flush
-                    pending_reasoning_item = None  # flush
-                    index += 1
+                    if annotations:
+                        accumulated_annotations.extend(annotations)
 
             elif isinstance(item, ResponseFunctionToolCall):
                 from litellm.responses.litellm_completion_transformation.transformation import (
@@ -708,34 +688,58 @@ class LiteLLMResponsesTransformationHandler(CompletionTransformationBridge):
                 # GenericResponseOutputItem from the completion bridge both land here
                 raw_item = item if isinstance(item, dict) else item.model_dump()
                 if raw_item.get("type") in ("function_call", "custom_tool_call"):
-                    # Tool calls accumulate into the single trailing tool_calls choice
-                    # like the typed branches above; a choice per call would hide every
-                    # call after choices[0] from chat clients
                     accumulated_tool_calls.append(_tool_call_dict_from_output_item(raw_item, tool_call_index))
                     tool_call_index += 1
+                elif raw_item.get("type") == "reasoning":
+                    continue
+                elif raw_item.get("type") == "message":
+                    has_message_item = True
+                    raw_role = raw_item.get("role")
+                    if isinstance(raw_role, str):
+                        message_role = raw_role
+                    raw_content = raw_item.get("content")
+                    for content_item in raw_content if isinstance(raw_content, list) else ():
+                        if not isinstance(content_item, dict) or content_item.get("type") != "output_text":
+                            continue
+                        response_text = content_item.get("text")
+                        text_parts.append(response_text if isinstance(response_text, str) else "")
+                        annotations = LiteLLMResponsesTransformationHandler._convert_annotations_to_chat_format(
+                            content_item.get("annotations")
+                        )
+                        if annotations:
+                            accumulated_annotations.extend(annotations)
                 elif handle_raw_dict_callback is not None:
-                    choice, index = handle_raw_dict_callback(item=raw_item, index=index)
+                    choice, _ = handle_raw_dict_callback(item=raw_item, index=0)
                     if choice is not None:
-                        choices.append(choice)
+                        return [choice]
             else:
                 pass  # don't fail request if item in list is not supported
 
-        # If we accumulated tool calls, create a single choice with all of them
-        if accumulated_tool_calls:
-            msg = Message(
-                content=None,
-                tool_calls=accumulated_tool_calls,
-                reasoning_content=reasoning_content,
-                reasoning_items=cast(
-                    list[ChatCompletionReasoningItem] | None,
-                    ([pending_reasoning_item] if pending_reasoning_item is not None else None),
-                ),
-            )
-            choices.append(Choices(message=msg, finish_reason="tool_calls", index=index))
-            reasoning_content = None
-            pending_reasoning_item = None
+        if not has_message_item and not accumulated_tool_calls and not reasoning_items:
+            return []
 
-        return choices
+        reasoning_content: Final = " ".join(
+            summary_block["text"]
+            for reasoning_item in reasoning_items
+            for summary_block in reasoning_item["summary"]
+            if summary_block.get("text")
+        )
+        msg: Final = Message(
+            role=message_role,
+            content=(
+                "".join(text_parts)
+                if has_message_item
+                else ("" if reasoning_items and not accumulated_tool_calls else None)
+            ),
+            tool_calls=accumulated_tool_calls or None,
+            reasoning_content=reasoning_content or None,
+            annotations=accumulated_annotations or None,
+            reasoning_items=_as_chat_reasoning_items(reasoning_items),
+        )
+        finish_reason: Final[Literal["stop", "tool_calls"]] = (
+            "tool_calls" if accumulated_tool_calls else "stop"
+        )
+        return [Choices(message=msg, finish_reason=finish_reason, index=0)]
 
     @staticmethod
     def _build_empty_incomplete_choice(
