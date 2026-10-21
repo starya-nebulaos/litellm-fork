@@ -1327,6 +1327,34 @@ def test_developer_message_content_uses_input_text():
     ]
 
 
+def test_text_part_keeps_prompt_cache_breakpoint_on_input_text():
+    handler: Final = LiteLLMResponsesTransformationHandler()
+    breakpoint_marker: Final = {"mode": "explicit"}
+
+    input_items, instructions = handler.convert_chat_completion_messages_to_responses_api(
+        [
+            {
+                "role": "system",
+                "content": [
+                    {"type": "text", "text": "static rules", "prompt_cache_breakpoint": breakpoint_marker},
+                    {"type": "text", "text": "dynamic context"},
+                ],
+            },
+            {"role": "user", "content": "hello"},
+        ]
+    )
+
+    assert instructions is None
+    assert input_items[0] == {
+        "type": "message",
+        "role": "system",
+        "content": [
+            {"type": "input_text", "text": "static rules", "prompt_cache_breakpoint": breakpoint_marker},
+            {"type": "input_text", "text": "dynamic context"},
+        ],
+    }
+
+
 def test_tool_message_output_uses_input_text_not_output_text():
     """
     Test that tool message content uses input_text type, not output_text.
