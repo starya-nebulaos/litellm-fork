@@ -14,6 +14,7 @@ Modificações feitas pelo time Starya/NebulaOS no fork. Use como referência ao
 | OCI reasoning_effort | `litellm/llms/oci/*`, `litellm/main.py` | Thiago, Federico |
 | Model Timestamps | `litellm/proxy/proxy_server.py` | Thiago |
 | Pricing Override Bypass | `litellm/proxy/litellm_pre_call_utils.py` | Thiago |
+| Breakpoint de cache na ponte Responses | `litellm/completion_extras/litellm_responses_transformation/transformation.py` | Claudio |
 
 ---
 
@@ -103,6 +104,17 @@ def _key_or_team_allows_client_pricing_override(...):
         return True
     ...
 ```
+
+---
+
+## 7. Breakpoint de cache na ponte Chat Completions -> Responses
+
+**Autor**: Claudio  
+**Arquivo**: `litellm/completion_extras/litellm_responses_transformation/transformation.py`
+
+Blocos `text` que carregam `prompt_cache_breakpoint` mantêm a marca no `input_text` gerado. Sem isso, modelos `openai/responses/*` (ex.: GPT-5.6 e GPT-6 no Bedrock Mantle) nunca recebem o breakpoint explícito, e o cache só cobre a última mensagem.
+
+Se o upstream passar a preservar o campo nesse ramo, ficar com a versão do upstream.
 
 ---
 
