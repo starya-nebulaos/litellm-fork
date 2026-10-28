@@ -244,6 +244,27 @@ def get_vendor_from_model(model: str) -> OCIVendors:
     return OCIVendors.GENERIC
 
 
+def _is_gemini_model(model: str) -> bool:
+    name: Final = model[4:] if model.lower().startswith("oci/") else model
+    return name.lower().startswith("google.gemini")
+
+
+def merge_system_messages(messages: list[AllMessageValues]) -> list[AllMessageValues]:
+    """Merge every system message into a single one at the top, in order.
+
+    OCI passes only the last SYSTEM message of a GENERIC request to Gemini; earlier
+    ones are silently ignored. The Vertex AI Gemini path keeps all of them in
+    ``systemInstruction``, so OCI Gemini gets the same single system message.
+    """
+    system_indices: Final = [i for i, m in enumerate(messages) if m.get("role") == "system"]
+    if not system_indices or system_indices == [0]:
+        return messages
+    texts: Final = [_extract_text_content(messages[i]["content"]) for i in system_indices]
+    merged: Final = "\n\n".join(t for t in texts if t.strip())
+    rest: Final = [m for m in messages if m.get("role") != "system"]
+    return [{"role": "system", "content": merged}, *rest] if merged else rest
+
+
 class OCIChatConfig(BaseConfig):
     """LiteLLM BaseConfig implementation for OCI Generative AI chat."""
 
@@ -585,7 +606,9 @@ class OCIChatConfig(BaseConfig):
                 servingMode=serving_mode,
                 chatRequest=OCIChatRequestPayload(
                     apiFormat=vendor.value,
-                    messages=adapt_messages_to_generic_oci_standard(messages),
+                    messages=adapt_messages_to_generic_oci_standard(
+                        merge_system_messages(messages) if _is_gemini_model(model) else messages
+                    ),
                     **self._get_optional_params(vendor, optional_params, model),
                 ),
             )

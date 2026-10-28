@@ -15,6 +15,7 @@ Modificações feitas pelo time Starya/NebulaOS no fork. Use como referência ao
 | Model Timestamps | `litellm/proxy/proxy_server.py` | Thiago |
 | Pricing Override Bypass | `litellm/proxy/litellm_pre_call_utils.py` | Thiago |
 | Breakpoint de cache na ponte Responses | `litellm/completion_extras/litellm_responses_transformation/transformation.py` | Claudio |
+| Um único system para Gemini na OCI | `litellm/llms/oci/chat/transformation.py` | Claudio |
 
 ---
 
@@ -115,6 +116,17 @@ def _key_or_team_allows_client_pricing_override(...):
 Blocos `text` que carregam `prompt_cache_breakpoint` mantêm a marca no `input_text` gerado. Sem isso, modelos `openai/responses/*` (ex.: GPT-5.6 e GPT-6 no Bedrock Mantle) nunca recebem o breakpoint explícito, e o cache só cobre a última mensagem.
 
 Se o upstream passar a preservar o campo nesse ramo, ficar com a versão do upstream.
+
+---
+
+## 8. Um único system para Gemini na OCI
+
+**Autor**: Claudio  
+**Arquivo**: `litellm/llms/oci/chat/transformation.py` (`merge_system_messages`, `_is_gemini_model`)
+
+Para modelos `google.gemini*` na OCI, todas as mensagens `system` viram uma só, no topo e na ordem, como a rota `vertex_ai/gemini` já faz com o `systemInstruction`. A OCI só repassa ao Gemini a última `SYSTEM` de um pedido GENERIC: um resumo de conversa em `system` apagava o prompt do agente. Os outros modelos GENERIC (Grok, Llama etc.) mantêm cada `system` na posição.
+
+Issue no upstream: BerriAI/litellm#48813. Se o upstream corrigir, ficar com a versão do upstream.
 
 ---
 
