@@ -1,0 +1,101 @@
+name: Build and Push to ECR (staging)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - litellm_internal_staging
+
+env:
+  ECR_REPO_NAME: nebula-os-litellm
+  IMAGE_TAG: aws-migration-staging
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-and-push:
+    name: Build and Push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.ECR_PUSH_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          platforms: linux/amd64
+          provenance: false
+          tags: |
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPO_NAME }}:${{ env.IMAGE_TAG }}
+            ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPO_NAME }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # AWS prod Argo tracks nebulaos-infra aws-migration, so a merge to the default branch
+      # here is a prod deploy, as it was on OCI with argocd-image-updater. The
+      # values pin the commit sha; the image only rolls out once this writes it
+      # back. See ADR-083 in nebulaos-dev-workspace.
+      - name: Promote the image into the production values
+        if: github.ref == 'refs/heads/litellm_internal_staging'
+        env:
+          GH_TOKEN: ${{ secrets.INFRA_PUSH_TOKEN }}
+          INFRA_BRANCH: aws-migration
+        run: |
+          set -euo pipefail
+
+          # clone outside the workspace, so the checkout tree is never shadowed
+          checkout="$(mktemp -d)"
+          git clone --quiet --branch "$INFRA_BRANCH" \
+            "https://x-access-token:${GH_TOKEN}@github.com/starya-nebulaos/nebulaos-infra.git" "$checkout"
+          cd "$checkout"
+
+          # one chart per ECR repository, so the names line up by construction
+          values="helm/${ECR_REPO_NAME}/values-production.yaml"
+          test -f "$values"
+
+          # rewrite the one line rather than letting yq reformat the file: the
+          # history of that repo is how we read what is deployed
+          # yq's `line` operator ignores document head comments and points at
+          # the parent node, so find the key in the image block directly
+          line="$(awk '/^image:/{inb=1;next} inb&&/^[^[:space:]]/{inb=0} inb&&/^[[:space:]]+tag:[[:space:]]/{print NR;exit}' "$values")"
+          test -n "$line"
+          sed -i "${line}s|^\( *tag:\).*|\1 \"${GITHUB_SHA}\"|" "$values"
+          test "$(yq '.image.tag' "$values")" = "$GITHUB_SHA"
+
+          if git diff --quiet; then
+            echo "$values already pins ${GITHUB_SHA}, nothing to promote"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --quiet -am "ci(production): ${ECR_REPO_NAME} to ${GITHUB_SHA}"
+
+          # another app repo can land on this branch while this job runs
+          for _ in 1 2 3; do
+            if git push --quiet origin "$INFRA_BRANCH"; then
+              exit 0
+            fi
+            git pull --rebase --quiet origin "$INFRA_BRANCH"
+          done
+
+          echo "could not push to $INFRA_BRANCH after 3 attempts"
+          exit 1
