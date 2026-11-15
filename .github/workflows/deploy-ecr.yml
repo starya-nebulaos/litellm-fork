@@ -49,7 +49,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # AWS prod Argo tracks nebulaos-infra main, so a merge to the default branch
+      # AWS prod Argo tracks nebulaos-infra aws-migration, so a merge to the default branch
       # here is a prod deploy, as it was on OCI with argocd-image-updater. The
       # values pin the commit sha; the image only rolls out once this writes it
       # back. See ADR-083 in nebulaos-dev-workspace.
@@ -57,7 +57,7 @@ jobs:
         if: github.ref == 'refs/heads/litellm_internal_staging'
         env:
           GH_TOKEN: ${{ secrets.INFRA_PUSH_TOKEN }}
-          INFRA_BRANCH: main
+          INFRA_BRANCH: aws-migration
         run: |
           set -euo pipefail
 
